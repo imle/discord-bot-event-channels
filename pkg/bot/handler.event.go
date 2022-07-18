@@ -114,7 +114,11 @@ func (em *EventManager) Reconcile(ctx context.Context, session *discordgo.Sessio
 		if !has {
 			em.logger.Infof("no existing event found for %s", event.ID)
 
-			existingEvent, err = em.eventCreated(session, event)
+			existingEvent = &Event{
+				ID:      event.ID,
+				GuildID: event.GuildID,
+			}
+			_, err := em.engine.InsertOne(existingEvent)
 			if err != nil {
 				return err
 			}
@@ -134,6 +138,8 @@ func (em *EventManager) Reconcile(ctx context.Context, session *discordgo.Sessio
 					return err
 				}
 			} else {
+				em.logger.Infof("found a matching channel name for %s", event.ID)
+
 				existingEvent.ChannelID = channel.ID
 				_, err = em.engine.ID(existingEvent.ID).Update(existingEvent)
 				if err != nil {
@@ -472,7 +478,7 @@ var dash = regexp.MustCompile(`\s+`)
 func eventChannelName(name string) string {
 	name = string(strip.ReplaceAll([]byte(name), []byte{}))
 	name = string(dash.ReplaceAll([]byte(name), []byte{'-'}))
-	return name
+	return strings.ToLower(name)
 }
 
 func isDiscordErrRESTCode(err error, code int) bool {
