@@ -273,8 +273,10 @@ func (em *EventManager) ConsumeSession(session *discordgo.Session) {
 			_, err := em.engine.ID(i.GuildID).Update(&Guild{NewEventChannelMessage: message.StringValue()})
 			if err != nil {
 				em.logger.WithError(err).Error("failed to update guild message")
+				reply = "Failed to update."
+			} else {
+				reply = "Message has been set!"
 			}
-			reply = "Message has been set!"
 		case cmdDeleteWhenDone.Name:
 			shouldDelete := options[cmdDeleteWhenDone.Options[0].Name]
 
@@ -283,8 +285,10 @@ func (em *EventManager) ConsumeSession(session *discordgo.Session) {
 			})
 			if err != nil {
 				em.logger.WithError(err).Error("failed to update guild")
+				reply = "Failed to update."
+			} else {
+				reply = "Options updated!"
 			}
-			reply = "Options updated!"
 		}
 
 		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
