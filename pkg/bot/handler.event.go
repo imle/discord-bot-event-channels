@@ -278,7 +278,9 @@ func (em *EventManager) ConsumeSession(session *discordgo.Session) {
 		case cmdDeleteWhenDone.Name:
 			shouldDelete := options[cmdDeleteWhenDone.Options[0].Name]
 
-			_, err := em.engine.ID(i.GuildID).Update(&Guild{DeleteWhenDone: shouldDelete.BoolValue()})
+			_, err := em.engine.Table(&Guild{}).ID(i.GuildID).Update(map[string]interface{}{
+				"delete_when_done": shouldDelete.BoolValue(),
+			})
 			if err != nil {
 				em.logger.WithError(err).Error("failed to update guild")
 			}
