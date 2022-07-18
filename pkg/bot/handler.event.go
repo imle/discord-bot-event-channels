@@ -174,9 +174,16 @@ func (em *EventManager) Reconcile(ctx context.Context, session *discordgo.Sessio
 }
 
 func (em *EventManager) RegisterGlobalCommands(session *discordgo.Session) error {
-	_, err := session.ApplicationCommandCreate(session.State.User.ID, "", &cmdNewEventChannelMessage)
-	if err != nil {
-		return err
+	cmds := []*discordgo.ApplicationCommand{
+		&cmdNewEventChannelMessage,
+		&cmdDeleteWhenDone,
+	}
+
+	for i := range cmds {
+		_, err := session.ApplicationCommandCreate(session.State.User.ID, "", cmds[i])
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -258,7 +265,7 @@ func (em *EventManager) ConsumeSession(session *discordgo.Session) {
 			options[opt.Name] = opt
 		}
 
-		var err error
+		var reply string
 		switch i.ApplicationCommandData().Name {
 		case cmdNewEventChannelMessage.Name:
 			message := options[cmdNewEventChannelMessage.Options[0].Name]
@@ -267,13 +274,23 @@ func (em *EventManager) ConsumeSession(session *discordgo.Session) {
 			if err != nil {
 				em.logger.WithError(err).Error("failed to update guild message")
 			}
-			err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-				Type: discordgo.InteractionResponseChannelMessageWithSource,
-				Data: &discordgo.InteractionResponseData{
-					Content: "Message has been set!",
-				},
-			})
+			reply = "Message has been set!"
+		case cmdDeleteWhenDone.Name:
+			shouldDelete := options[cmdDeleteWhenDone.Options[0].Name]
+
+			_, err := em.engine.ID(i.GuildID).Update(&Guild{DeleteWhenDone: shouldDelete.BoolValue()})
+			if err != nil {
+				em.logger.WithError(err).Error("failed to update guild")
+			}
+			reply = "Options updated!"
 		}
+
+		err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: reply,
+			},
+		})
 		if err != nil {
 			em.logger.WithError(err).Error("failed to reply to command")
 		}
@@ -328,7 +345,17 @@ func (em *EventManager) eventDeleted(s *discordgo.Session, m *discordgo.GuildSch
 		return fmt.Errorf("was not able to find event %s: %q", m.ID, m.Name)
 	}
 
-	_, err = s.ChannelDelete(existingEvent.ChannelID)
+	guild := &Guild{ID: m.GuildID}
+	found, err = em.engine.Get(guild)
+	if err != nil {
+		return err
+	}
+
+	if guild.DeleteWhenDone {
+		_, err = s.ChannelDelete(existingEvent.ChannelID)
+	} else {
+		_, err = s.ChannelEdit(existingEvent.ChannelID, "done-"+eventChannelName(m.Name))
+	}
 	if err != nil {
 		return err
 	}
@@ -431,25 +458,6 @@ func (em *EventManager) possiblyCreateGuild(_ *discordgo.Session, guildId string
 	}
 
 	return false, nil
-}
-
-var dmPermission = false
-var defaultMemberPermissions int64 = discordgo.PermissionManageServer
-
-var cmdNewEventChannelMessage = discordgo.ApplicationCommand{
-	Name:                     "new-event-channel-message",
-	Description:              "Message to send when a new channel is created",
-	DMPermission:             &dmPermission,
-	DefaultMemberPermissions: &defaultMemberPermissions,
-	Options: []*discordgo.ApplicationCommandOption{
-		{
-			Name:        "message",
-			Description: "The message",
-			Type:        discordgo.ApplicationCommandOptionString,
-			Required:    false,
-			MaxLength:   255,
-		},
-	},
 }
 
 var strip = regexp.MustCompile(`[^\w\d\s]+`)
