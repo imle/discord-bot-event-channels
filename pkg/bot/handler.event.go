@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/iancoleman/strcase"
 	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 	"xorm.io/xorm"
@@ -452,7 +453,7 @@ var cmdNewEventChannelMessage = discordgo.ApplicationCommand{
 }
 
 func eventChannelName(name string) string {
-	return "event-" + name
+	return strcase.ToKebab(name)
 }
 
 func isDiscordErrRESTCode(err error, code int) bool {
