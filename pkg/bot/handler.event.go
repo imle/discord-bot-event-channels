@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/iancoleman/strcase"
 	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 	"xorm.io/xorm"
@@ -452,8 +452,13 @@ var cmdNewEventChannelMessage = discordgo.ApplicationCommand{
 	},
 }
 
+var strip = regexp.MustCompile(`[^\w\d\s]+`)
+var dash = regexp.MustCompile(`\s+`)
+
 func eventChannelName(name string) string {
-	return strcase.ToKebab(name)
+	name = string(strip.ReplaceAll([]byte(name), []byte{}))
+	name = string(dash.ReplaceAll([]byte(name), []byte{'-'}))
+	return name
 }
 
 func isDiscordErrRESTCode(err error, code int) bool {
