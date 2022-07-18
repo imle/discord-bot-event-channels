@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/lib/pq"
@@ -127,7 +128,7 @@ func (em *EventManager) Reconcile(ctx context.Context, session *discordgo.Sessio
 			if !found {
 				em.logger.Infof("no existing event channel found for %s", event.ID)
 
-				err = em.createChannelForEvent(session, existingEvent, event.Name)
+				existingEvent.ChannelID, err = em.createChannelForEvent(session, event)
 				if err != nil {
 					return err
 				}
@@ -288,7 +289,7 @@ func (em *EventManager) eventCreated(s *discordgo.Session, m *discordgo.GuildSch
 		return nil, err
 	}
 
-	err = em.createChannelForEvent(s, evt, m.Name)
+	evt.ChannelID, err = em.createChannelForEvent(s, m)
 	if err != nil {
 		return nil, err
 	}
@@ -339,22 +340,58 @@ func (em *EventManager) eventDeleted(s *discordgo.Session, m *discordgo.GuildSch
 	return nil
 }
 
-func (em *EventManager) createChannelForEvent(s *discordgo.Session, evt *Event, name string) error {
-	channel, err := s.GuildChannelCreate(evt.GuildID, eventChannelName(name), discordgo.ChannelTypeGuildText)
+func (em *EventManager) createChannelForEvent(s *discordgo.Session, evt *discordgo.GuildScheduledEvent) (string, error) {
+	channels, err := s.GuildChannels(evt.GuildID)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	evt.ChannelID = channel.ID
-	_, err = em.engine.ID(evt.ID).Update(evt)
+	var eventsCategory *discordgo.Channel
+	for i := range channels {
+		if channels[i].Type != discordgo.ChannelTypeGuildCategory {
+			continue
+		}
+
+		if strings.ToLower(channels[i].Name) != "events" {
+			continue
+		}
+
+		eventsCategory = channels[i]
+		break
+	}
+	if eventsCategory == nil {
+		eventsCategory, err = s.GuildChannelCreateComplex(evt.GuildID, discordgo.GuildChannelCreateData{
+			Name:     "EVENTS",
+			Type:     discordgo.ChannelTypeGuildCategory,
+			Position: 1,
+		})
+		if err != nil {
+			return "", err
+		}
+	}
+
+	channel, err := s.GuildChannelCreateComplex(evt.GuildID, discordgo.GuildChannelCreateData{
+		Name:     eventChannelName(evt.Name),
+		Type:     discordgo.ChannelTypeGuildText,
+		ParentID: eventsCategory.ID,
+	})
 	if err != nil {
-		return err
+		return "", err
+	}
+
+	_, err = em.engine.ID(evt.ID).Update(&Event{
+		ID:        evt.ID,
+		GuildID:   evt.GuildID,
+		ChannelID: channel.ID,
+	})
+	if err != nil {
+		return "", err
 	}
 
 	var guild Guild
 	has, err := em.engine.ID(evt.GuildID).Get(&guild)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	message := "@here a new event has been created!"
@@ -363,15 +400,15 @@ func (em *EventManager) createChannelForEvent(s *discordgo.Session, evt *Event, 
 	}
 
 	if message == "" {
-		return nil
+		return channel.ID, nil
 	}
 
 	_, err = s.ChannelMessageSend(channel.ID, message)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	return nil
+	return channel.ID, nil
 }
 
 func (em *EventManager) possiblyCreateGuild(_ *discordgo.Session, guildId string) (exists bool, err error) {
@@ -408,7 +445,7 @@ var cmdNewEventChannelMessage = discordgo.ApplicationCommand{
 			Name:        "message",
 			Description: "The message",
 			Type:        discordgo.ApplicationCommandOptionString,
-			Required:    true,
+			Required:    false,
 			MaxLength:   255,
 		},
 	},
