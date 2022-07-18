@@ -51,7 +51,27 @@ func (em EventManager) ReconcileAll(ctx context.Context, session *discordgo.Sess
 	}
 
 	for _, existingGuild := range existingGuilds {
-		err := em.Reconcile(ctx, session, existingGuild.ID)
+		guild, err := session.Guild(existingGuild.ID)
+		if err != nil {
+			if code, present := getDiscordErrRESTCode(err); present {
+				switch code {
+				case http.StatusNotFound, http.StatusForbidden:
+					_, err = em.engine.Table(&Event{}).Where("guild_id = ?", existingGuild.ID).Delete()
+					if err != nil {
+						return err
+					}
+					_, err = em.engine.Table(&Guild{}).Where("id = ?", existingGuild.ID).Delete()
+					if err != nil {
+						return err
+					}
+					continue
+				}
+
+				return err
+			}
+		}
+
+		err = em.Reconcile(ctx, session, guild)
 		if err != nil {
 			return err
 		}
@@ -60,9 +80,9 @@ func (em EventManager) ReconcileAll(ctx context.Context, session *discordgo.Sess
 	return nil
 }
 
-func (em *EventManager) Reconcile(ctx context.Context, session *discordgo.Session, existingGuildID string) error {
+func (em *EventManager) Reconcile(ctx context.Context, session *discordgo.Session, existingGuild *discordgo.Guild) error {
 	var existingEvents []*Event
-	err := em.engine.Context(ctx).Table(&Event{}).Where("guild_id = ?", existingGuildID).Find(&existingEvents)
+	err := em.engine.Context(ctx).Table(&Event{}).Where("guild_id = ?", existingGuild.ID).Find(&existingEvents)
 	if err != nil {
 		return err
 	}
@@ -72,7 +92,7 @@ func (em *EventManager) Reconcile(ctx context.Context, session *discordgo.Sessio
 		existingEventsMap[existingEvents[i].ID] = existingEvents[i]
 	}
 
-	channels, err := session.GuildChannels(existingGuildID)
+	channels, err := session.GuildChannels(existingGuild.ID)
 	if err != nil {
 		return err
 	}
@@ -82,7 +102,7 @@ func (em *EventManager) Reconcile(ctx context.Context, session *discordgo.Sessio
 		channelNameMap[channels[i].Name] = channels[i]
 	}
 
-	events, err := session.GuildScheduledEvents(existingGuildID, false)
+	events, err := session.GuildScheduledEvents(existingGuild.ID, false)
 	if err != nil {
 		return err
 	}
@@ -122,7 +142,7 @@ func (em *EventManager) Reconcile(ctx context.Context, session *discordgo.Sessio
 
 		channel, err := session.Channel(existingEvent.ChannelID)
 		if err != nil {
-			if isDiscordErrNotFound(err) {
+			if isDiscordErrRESTCode(err, http.StatusNotFound) {
 				continue
 			}
 			return err
@@ -138,7 +158,7 @@ func (em *EventManager) Reconcile(ctx context.Context, session *discordgo.Sessio
 
 	for _, event := range existingEventsMap {
 		_, err = session.ChannelDelete(event.ChannelID)
-		if err != nil && !isDiscordErrNotFound(err) {
+		if err != nil && !isDiscordErrRESTCode(err, http.StatusNotFound) {
 			return err
 		}
 
@@ -164,16 +184,23 @@ func (em *EventManager) ConsumeSession(session *discordgo.Session) {
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.GuildCreate) {
 		em.logger.Debug("received guild create event")
 
-		err := em.possiblyCreateGuild(s, m.ID)
+		exists, err := em.possiblyCreateGuild(s, m.ID)
 		if err != nil {
 			em.logger.WithError(err).Error("failed to create guild")
+		}
+
+		if !exists {
+			err = em.Reconcile(context.Background(), session, m.Guild)
+			if err != nil {
+				return
+			}
 		}
 	})
 
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.GuildScheduledEventCreate) {
 		em.logger.Debug("received create event")
 
-		err := em.possiblyCreateGuild(s, m.GuildID)
+		_, err := em.possiblyCreateGuild(s, m.GuildID)
 		if err != nil {
 			em.logger.WithError(err).Error("failed to create guild")
 		}
@@ -186,7 +213,7 @@ func (em *EventManager) ConsumeSession(session *discordgo.Session) {
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.GuildScheduledEventUpdate) {
 		em.logger.Debug("received update event")
 
-		err := em.possiblyCreateGuild(s, m.GuildID)
+		_, err := em.possiblyCreateGuild(s, m.GuildID)
 		if err != nil {
 			em.logger.WithError(err).Error("failed to create guild")
 		}
@@ -210,7 +237,7 @@ func (em *EventManager) ConsumeSession(session *discordgo.Session) {
 	session.AddHandler(func(s *discordgo.Session, m *discordgo.GuildScheduledEventDelete) {
 		em.logger.Debug("received delete event")
 
-		err := em.possiblyCreateGuild(s, m.GuildID)
+		_, err := em.possiblyCreateGuild(s, m.GuildID)
 		if err != nil {
 			em.logger.WithError(err).Error("failed to create guild")
 		}
@@ -347,23 +374,25 @@ func (em *EventManager) createChannelForEvent(s *discordgo.Session, evt *Event, 
 	return nil
 }
 
-func (em *EventManager) possiblyCreateGuild(_ *discordgo.Session, guildId string) error {
-	_, err := em.engine.InsertOne(&Guild{
+func (em *EventManager) possiblyCreateGuild(_ *discordgo.Session, guildId string) (exists bool, err error) {
+	_, err = em.engine.InsertOne(&Guild{
 		ID:                     guildId,
 		NewEventChannelMessage: "@here a new event has been created!",
 	})
 	if err != nil {
 		var pqErr *pq.Error
 		if !errors.As(err, &pqErr) {
-			return err
+			return false, err
 		}
 
-		if pqErr.Code != "23505" {
-			return err
+		if pqErr.Code == "23505" {
+			return true, nil
+		} else {
+			return false, err
 		}
 	}
 
-	return nil
+	return false, nil
 }
 
 var dmPermission = false
@@ -389,15 +418,24 @@ func eventChannelName(name string) string {
 	return "event-" + name
 }
 
-func isDiscordErrNotFound(err error) bool {
-	if err == nil {
+func isDiscordErrRESTCode(err error, code int) bool {
+	restCode, present := getDiscordErrRESTCode(err)
+	if present {
 		return false
+	}
+
+	return restCode == code
+}
+
+func getDiscordErrRESTCode(err error) (int, bool) {
+	if err == nil {
+		return 0, false
 	}
 
 	var discordErr *discordgo.RESTError
 	if !errors.As(err, &discordErr) {
-		return false
+		return 0, false
 	}
 
-	return discordErr.Response.StatusCode == http.StatusNotFound
+	return discordErr.Response.StatusCode, true
 }

@@ -28,6 +28,7 @@ var startCmd = &cobra.Command{
 		}
 
 		logger := logrus.New()
+		logger.SetLevel(logrus.DebugLevel)
 
 		manager, err := start.InitializeEventManager(logger, start.EngineConfig{
 			URI: u,
