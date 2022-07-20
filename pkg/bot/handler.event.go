@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/lib/pq"
@@ -229,15 +230,15 @@ func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Sessio
 	}
 
 	for _, event := range events {
-		// Remove all found or created keys to see what was deleted.
-		delete(internalEventsMap, event.ID)
-
 		internalEvent, has := internalEventsMap[event.ID]
 		log := em.logger.WithFields(logrus.Fields{
 			"method":   "Reconcile",
 			"guild_id": event.GuildID,
 			"event_id": event.ID,
 		})
+
+		// Remove all found or created keys to see what was deleted.
+		delete(internalEventsMap, event.ID)
 
 		if has {
 			var missing = make([]string, 0, 3)
@@ -252,13 +253,13 @@ func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Sessio
 			}
 			if internalEvent.RoleID == "" {
 				missing = append(missing, "RoleID")
-				log.Warn("found internal event with missing RoleID")
 			}
 			if internalEvent.AnnounceMessageID == "" {
 				missing = append(missing, "AnnounceMessageID")
-				log.Warn("found internal event with missing AnnounceMessageID")
 			}
-			log.Warnf("found internal event with missing (%s)", strings.Join(missing, ", "))
+			if len(missing) > 0 {
+				log.Warnf("found internal event with missing (%s)", strings.Join(missing, ", "))
+			}
 		}
 
 		if !has {
@@ -305,6 +306,11 @@ func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Sessio
 
 // Ensures we reconcile all discordgo.Guild after a restart.
 func (em *EventManager) onReady(ctx context.Context, log *logrus.Entry, s *discordgo.Session, r *discordgo.Ready) error {
+	err := em.RegisterGlobalCommands(s)
+	if err != nil {
+		return err
+	}
+
 	for _, guild := range r.Guilds {
 		err := em.reconcile(ctx, s, guild)
 		if err != nil {
@@ -317,7 +323,7 @@ func (em *EventManager) onReady(ctx context.Context, log *logrus.Entry, s *disco
 
 // When a discordgo.Guild is added to the service that we reconcile it.
 func (em *EventManager) onGuildCreate(ctx context.Context, s *discordgo.Session, m *discordgo.GuildCreate) error {
-	_, exists, err := em.possiblyCreateGuild(ctx, m.ID)
+	_, exists, err := em.possiblyCreateGuild(ctx, m.Guild)
 	if err != nil {
 		return fmt.Errorf("failed to create guild: %w", err)
 	}
@@ -343,10 +349,10 @@ func (em *EventManager) onGuildEventCreate(ctx context.Context, log *logrus.Entr
 	var message *discordgo.Message
 	var event *Event
 
-	var guild *Guild
-	guild, _, err = em.possiblyCreateGuild(ctx, m.GuildID)
+	var guild Guild
+	_, err = em.engine.Context(ctx).ID(m.GuildID).Get(&guild)
 	if err != nil {
-		return fmt.Errorf("failed to create guild: %w", err)
+		return fmt.Errorf("failed to find internal guild: %w", err)
 	}
 
 	// Try to clean up our mess if anything failed.
@@ -445,7 +451,7 @@ func (em *EventManager) onGuildEventCreate(ctx context.Context, log *logrus.Entr
 	if message != nil {
 		event.AnnounceMessageID = message.ID
 	}
-	_, err = em.engine.InsertOne(event)
+	_, err = em.engine.Insert(event)
 	if err != nil {
 		return fmt.Errorf("failed to insert event: %w", err)
 	}
@@ -458,6 +464,10 @@ func (em *EventManager) onGuildEventUpdate(ctx context.Context, log *logrus.Entr
 	guild, event, err := em.getGuildAndEvent(ctx, m.GuildScheduledEvent.GuildID, m.GuildScheduledEvent.ID)
 	if err != nil {
 		return err
+	}
+
+	if event == nil {
+		return fmt.Errorf("was not able to find internal event")
 	}
 
 	switch m.Status {
@@ -482,6 +492,10 @@ func (em *EventManager) onGuildEventDelete(ctx context.Context, log *logrus.Entr
 		return err
 	}
 
+	if event == nil {
+		return fmt.Errorf("was not able to find internal event")
+	}
+
 	err = em.deleteEvent(ctx, log, s, guild, event, m.GuildScheduledEvent)
 	if err != nil {
 		return fmt.Errorf("failed to delete event: %w", err)
@@ -496,9 +510,18 @@ func (em *EventManager) onGuildEventUserAdd(ctx context.Context, s *discordgo.Se
 		return nil
 	}
 
-	_, event, err := em.getGuildAndEvent(ctx, m.GuildID, m.GuildScheduledEventID)
-	if err != nil {
-		return err
+	var event *Event
+	var err error
+	for i := 0; i < 5; i++ {
+		_, event, err = em.getGuildAndEvent(ctx, m.GuildID, m.GuildScheduledEventID)
+		if err != nil {
+			return err
+		}
+		if event != nil {
+			break
+		}
+
+		time.Sleep(1 * time.Second)
 	}
 
 	err = s.GuildMemberRoleAdd(m.GuildID, m.UserID, event.RoleID)
@@ -517,6 +540,10 @@ func (em *EventManager) onGuildEventUserRemove(ctx context.Context, s *discordgo
 	_, event, err := em.getGuildAndEvent(ctx, m.GuildID, m.GuildScheduledEventID)
 	if err != nil {
 		return err
+	}
+
+	if event == nil {
+		return fmt.Errorf("was not able to find internal event")
 	}
 
 	err = s.GuildMemberRoleRemove(m.GuildID, m.UserID, event.RoleID)
@@ -575,11 +602,12 @@ func (em *EventManager) handleInteraction(s *discordgo.Session, i *discordgo.Int
 
 const PGUniqueConstraintViolation = "23505"
 
-func (em *EventManager) possiblyCreateGuild(ctx context.Context, guildId string) (guild *Guild, exists bool, err error) {
+func (em *EventManager) possiblyCreateGuild(ctx context.Context, m *discordgo.Guild) (guild *Guild, exists bool, err error) {
 	guild = &Guild{
-		ID:                     guildId,
-		NewEventChannelMessage: "`%EVENT%` was just created, if you want to join the channel, mark yourself as interested on the event!",
-		EventColor:             0xFFFFFF,
+		ID:                         m.ID,
+		NewEventChannelMessage:     "`%EVENT%` was just created, if you want to join the channel, mark yourself as interested on the event!",
+		EventColor:                 0xFFFFFF,
+		EventAnnouncementChannelID: m.PublicUpdatesChannelID,
 	}
 
 	_, err = em.engine.Context(ctx).Insert(guild)
@@ -596,7 +624,7 @@ func (em *EventManager) possiblyCreateGuild(ctx context.Context, guildId string)
 		return nil, false, err
 	}
 
-	_, err = em.engine.Context(ctx).ID(guildId).Get(guild)
+	_, err = em.engine.Context(ctx).ID(m.ID).Get(guild)
 	if err != nil {
 		return nil, false, err
 	}
@@ -632,9 +660,10 @@ func (em *EventManager) deleteEvent(ctx context.Context, log *logrus.Entry, s *d
 }
 
 func (em *EventManager) getGuildAndEvent(ctx context.Context, guildID string, eventID string) (*Guild, *Event, error) {
-	guild, _, err := em.possiblyCreateGuild(ctx, guildID)
+	guild := &Guild{}
+	_, err := em.engine.Context(ctx).ID(guildID).Get(guild)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create guild: %w", err)
+		return nil, nil, err
 	}
 
 	event := &Event{ID: eventID}
@@ -644,7 +673,7 @@ func (em *EventManager) getGuildAndEvent(ctx context.Context, guildID string, ev
 	}
 
 	if !found {
-		return nil, nil, fmt.Errorf("was not able to find internal event")
+		return guild, nil, nil
 	}
 
 	return guild, event, nil

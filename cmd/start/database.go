@@ -1,6 +1,8 @@
 package start
 
 import (
+	"fmt"
+
 	_ "github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 	"github.com/xo/dburl"
@@ -15,7 +17,7 @@ type EngineConfig struct {
 
 func NewEngine(cfg EngineConfig, logger *logrus.Logger) (xorm.EngineInterface, error) {
 	engine, err := xorm.NewEngine(cfg.URI.Driver, cfg.URI.DSN)
-	engine.SetLogger(&xormLogrus{logger: logger})
+	engine.SetLogger(&xormLogrus{logger: logger, level: log.LOG_DEBUG})
 	engine.ShowSQL(cfg.LogQueries)
 	return engine, err
 }
@@ -27,15 +29,24 @@ type xormLogrus struct {
 	showSQL bool
 }
 
-//func (l *xormLogrus) BeforeSQL(ctx log.LogContext) {
-//	//TODO implement me
-//	panic("implement me")
-//}
-//
-//func (l *xormLogrus) AfterSQL(ctx log.LogContext) {
-//	//TODO implement me
-//	panic("implement me")
-//}
+func (l *xormLogrus) BeforeSQL(ctx log.LogContext) {}
+
+func (l *xormLogrus) AfterSQL(ctx log.LogContext) {
+	var sessionPart string
+	v := ctx.Ctx.Value(log.SessionIDKey)
+	if key, ok := v.(string); ok {
+		sessionPart = fmt.Sprintf(" [%s]", key)
+	}
+
+	fields := logrus.Fields{
+		"xorm.session":  sessionPart,
+		"xorm.sql":      ctx.SQL,
+		"xorm.args":     ctx.Args,
+		"xorm.duration": ctx.ExecuteTime,
+	}
+
+	l.logger.WithFields(fields).Debugf("sql statement")
+}
 
 func (l *xormLogrus) Debug(v ...interface{}) {
 	l.logger.Debug(v...)

@@ -67,11 +67,6 @@ var startCmd = &cobra.Command{
 			}
 		}()
 
-		err = manager.RegisterGlobalCommands(session)
-		if err != nil {
-			return err
-		}
-
 		stop := make(chan os.Signal, 1)
 		defer close(stop)
 		signal.Notify(stop, os.Interrupt)
