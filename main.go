@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 
@@ -12,5 +13,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
 	defer cancel()
 
-	cmd.Execute(ctx)
+	err := cmd.Execute(ctx)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 }

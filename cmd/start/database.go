@@ -8,9 +8,12 @@ import (
 )
 
 type EngineConfig struct {
-	URI *dburl.URL
+	URI        *dburl.URL
+	LogQueries bool
 }
 
 func NewEngine(cfg EngineConfig) (xorm.EngineInterface, error) {
-	return xorm.NewEngine(cfg.URI.Driver, cfg.URI.DSN)
+	engine, err := xorm.NewEngine(cfg.URI.Driver, cfg.URI.DSN)
+	engine.ShowSQL(cfg.LogQueries)
+	return engine, err
 }

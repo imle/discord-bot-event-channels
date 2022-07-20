@@ -1,8 +1,6 @@
 package start
 
 import (
-	"fmt"
-
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -15,10 +13,6 @@ func NewDiscordGoSession(cfg DiscordSessionConfig) (*discordgo.Session, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	s.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
-		fmt.Println("Bot is ready")
-	})
 
 	return s, nil
 }

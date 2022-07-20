@@ -31,7 +31,8 @@ var startCmd = &cobra.Command{
 		logger.SetLevel(logrus.DebugLevel)
 
 		manager, err := start.InitializeEventManager(logger, start.EngineConfig{
-			URI: u,
+			URI:        u,
+			LogQueries: true, // TODO:
 		})
 		if err != nil {
 			return err
@@ -54,16 +55,17 @@ var startCmd = &cobra.Command{
 			return err
 		}
 
-		err = manager.ReconcileAll(cmd.Context(), session)
-		if err != nil {
-			return err
-		}
-
 		err = session.Open()
 		if err != nil {
 			return fmt.Errorf("cannot open the session: %w", err)
 		}
-		defer session.Close()
+
+		defer func() {
+			err := session.Close()
+			if err != nil {
+				logger.WithError(err).Error("failed to properly close session")
+			}
+		}()
 
 		err = manager.RegisterGlobalCommands(session)
 		if err != nil {
