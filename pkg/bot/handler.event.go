@@ -241,7 +241,7 @@ func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Sessio
 		delete(internalEventsMap, event.ID)
 
 		if has {
-			var missing = make([]string, 0, 3)
+			var missing = make([]string, 0)
 			if internalEvent.ChannelID == "" {
 				missing = append(missing, "ChannelID")
 				// Delete the event and re-create it
@@ -253,9 +253,6 @@ func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Sessio
 			}
 			if internalEvent.RoleID == "" {
 				missing = append(missing, "RoleID")
-			}
-			if internalEvent.AnnounceMessageID == "" {
-				missing = append(missing, "AnnounceMessageID")
 			}
 			if len(missing) > 0 {
 				log.Warnf("found internal event with missing (%s)", strings.Join(missing, ", "))
