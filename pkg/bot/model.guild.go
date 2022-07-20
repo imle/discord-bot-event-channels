@@ -10,6 +10,7 @@ type Guild struct {
 	DeleteWhenDone             bool
 	EventAnnouncementChannelID string
 	EventColor                 int
+	EventChannelParentID       string
 }
 
 func (g *Guild) GetNewEventChannelMessage(eventName string) string {

@@ -33,6 +33,7 @@ func NewEventManager(
 }
 
 func (em EventManager) SyncDB() error {
+	em.engine.ShowSQL(false)
 	em.engine.SetMapper(names.GonicMapper{})
 	if err := em.engine.Sync2(new(Guild)); err != nil {
 		return err
@@ -40,6 +41,7 @@ func (em EventManager) SyncDB() error {
 	if err := em.engine.Sync2(new(Event)); err != nil {
 		return err
 	}
+	em.engine.ShowSQL(true)
 
 	return nil
 }
@@ -52,7 +54,7 @@ func (em *EventManager) ConsumeSession(s *discordgo.Session) {
 
 		log.Debug("received")
 
-		err := em.onReady(context.TODO(), s, r)
+		err := em.onReady(context.TODO(), log, s, r)
 		if err != nil {
 			log.WithError(err).Error("failed")
 			return
@@ -136,7 +138,6 @@ func (em *EventManager) ConsumeSession(s *discordgo.Session) {
 
 		log.Debug("received")
 
-		// Add to role
 		err := em.onGuildEventUserAdd(context.TODO(), s, m)
 		if err != nil {
 			log.WithError(err).Error("failed")
@@ -154,7 +155,6 @@ func (em *EventManager) ConsumeSession(s *discordgo.Session) {
 
 		log.Debug("received")
 
-		// Remove from role
 		err := em.onGuildEventUserRemove(context.TODO(), s, m)
 		if err != nil {
 			log.WithError(err).Error("failed")
@@ -196,7 +196,6 @@ func (em *EventManager) RegisterGlobalCommands(session *discordgo.Session) error
 	return nil
 }
 
-// TODO: Refactor
 func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Session, guild *discordgo.Guild) error {
 	var internalEvents []*Event
 	err := em.engine.Context(ctx).Table(&Event{}).Where("guild_id = ?", guild.ID).Find(&internalEvents)
@@ -247,7 +246,7 @@ func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Sessio
 				// Delete the event and re-create it
 				_, err := em.engine.Table(&Event{}).ID(event.ID).Delete()
 				if err != nil {
-					log.Errorf("failed to delete event channel")
+					log.WithError(err).Errorf("failed to delete event channel")
 				}
 				has = false
 			}
@@ -267,7 +266,7 @@ func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Sessio
 				GuildScheduledEvent: event,
 			})
 			if err != nil {
-				log.Errorf("failed to create event channel")
+				log.WithError(err).Errorf("failed to create event channel")
 			}
 
 			continue
@@ -305,11 +304,11 @@ func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Sessio
 }
 
 // Ensures we reconcile all discordgo.Guild after a restart.
-func (em *EventManager) onReady(ctx context.Context, s *discordgo.Session, r *discordgo.Ready) error {
+func (em *EventManager) onReady(ctx context.Context, log *logrus.Entry, s *discordgo.Session, r *discordgo.Ready) error {
 	for _, guild := range r.Guilds {
 		err := em.reconcile(ctx, s, guild)
 		if err != nil {
-			return fmt.Errorf("failed to reconcile %q: %w", guild.ID, err)
+			log.WithField("guild_id", guild.ID).WithError(err).Errorf("failed to reconcile")
 		}
 	}
 
@@ -378,6 +377,22 @@ func (em *EventManager) onGuildEventCreate(ctx context.Context, log *logrus.Entr
 		}
 	}()
 
+	var roles []*discordgo.Role
+	roles, err = s.GuildRoles(m.GuildID)
+	if err != nil {
+		return fmt.Errorf("failed to create role: %w", err)
+	}
+	var atEveryoneRole *discordgo.Role
+	for _, role := range roles {
+		if role.Name == "@everyone" {
+			atEveryoneRole = role
+			break
+		}
+	}
+	if atEveryoneRole == nil {
+		return fmt.Errorf("failed to find @everyone role")
+	}
+
 	// TODO: Make a PR to allow for giving a struct with create options.
 	role, err = s.GuildRoleCreate(m.GuildID)
 	if err != nil {
@@ -391,34 +406,44 @@ func (em *EventManager) onGuildEventCreate(ctx context.Context, log *logrus.Entr
 	}
 
 	channel, err = s.GuildChannelCreateComplex(m.GuildID, discordgo.GuildChannelCreateData{
-		Name: eventChannelName(m.Name),
-		Type: discordgo.ChannelTypeGuildText,
+		Name:     eventChannelName(m.Name),
+		Type:     discordgo.ChannelTypeGuildText,
+		ParentID: guild.EventChannelParentID,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create channel: %w", err)
 	}
 
-	err = s.ChannelPermissionSet(channel.ID, "@everyone", discordgo.PermissionOverwriteTypeRole, 0, discordgo.PermissionViewChannel)
-	if err != nil {
-		return fmt.Errorf("failed to hide channel: %w", err)
-	}
-
-	err = s.ChannelPermissionSet(channel.ID, role.ID, discordgo.PermissionOverwriteTypeRole, EventRolePermission, 0)
+	err = s.ChannelPermissionSet(channel.ID, s.State.User.ID, discordgo.PermissionOverwriteTypeMember, discordgo.PermissionViewChannel, 0)
 	if err != nil {
 		return fmt.Errorf("failed to add permissions to channel: %w", err)
 	}
 
-	message, err = s.ChannelMessageSend(guild.EventAnnouncementChannelID, guild.GetNewEventChannelMessage(m.Name))
+	err = s.ChannelPermissionSet(channel.ID, role.ID, discordgo.PermissionOverwriteTypeRole, discordgo.PermissionViewChannel, 0)
 	if err != nil {
-		return fmt.Errorf("failed to announce channel: %w", err)
+		return fmt.Errorf("failed to add permissions to channel: %w", err)
+	}
+
+	err = s.ChannelPermissionSet(channel.ID, atEveryoneRole.ID, discordgo.PermissionOverwriteTypeRole, 0, discordgo.PermissionViewChannel)
+	if err != nil {
+		return fmt.Errorf("failed to hide channel: %w", err)
+	}
+
+	if guild.EventAnnouncementChannelID != "" {
+		message, err = s.ChannelMessageSend(guild.EventAnnouncementChannelID, guild.GetNewEventChannelMessage(m.Name))
+		if err != nil {
+			return fmt.Errorf("failed to announce channel: %w", err)
+		}
 	}
 
 	event = &Event{
-		ID:                m.ID,
-		GuildID:           m.GuildID,
-		RoleID:            role.ID,
-		ChannelID:         channel.ID,
-		AnnounceMessageID: message.ID,
+		ID:        m.ID,
+		GuildID:   m.GuildID,
+		RoleID:    role.ID,
+		ChannelID: channel.ID,
+	}
+	if message != nil {
+		event.AnnounceMessageID = message.ID
 	}
 	_, err = em.engine.InsertOne(event)
 	if err != nil {
@@ -467,6 +492,10 @@ func (em *EventManager) onGuildEventDelete(ctx context.Context, log *logrus.Entr
 
 // Add the discordgo.User to the discordgo.Role for the discordgo.Event to allow them to see the discordgo.Channel.
 func (em *EventManager) onGuildEventUserAdd(ctx context.Context, s *discordgo.Session, m *discordgo.GuildScheduledEventUserAdd) error {
+	if m.UserID == s.State.User.ID {
+		return nil
+	}
+
 	_, event, err := em.getGuildAndEvent(ctx, m.GuildID, m.GuildScheduledEventID)
 	if err != nil {
 		return err
@@ -481,6 +510,10 @@ func (em *EventManager) onGuildEventUserAdd(ctx context.Context, s *discordgo.Se
 }
 
 func (em *EventManager) onGuildEventUserRemove(ctx context.Context, s *discordgo.Session, m *discordgo.GuildScheduledEventUserRemove) error {
+	if m.UserID == s.State.User.ID {
+		return nil
+	}
+
 	_, event, err := em.getGuildAndEvent(ctx, m.GuildID, m.GuildScheduledEventID)
 	if err != nil {
 		return err
@@ -545,7 +578,7 @@ const PGUniqueConstraintViolation = "23505"
 func (em *EventManager) possiblyCreateGuild(ctx context.Context, guildId string) (guild *Guild, exists bool, err error) {
 	guild = &Guild{
 		ID:                     guildId,
-		NewEventChannelMessage: "@here a new event has been created!",
+		NewEventChannelMessage: "`%EVENT%` was just created, if you want to join the channel, mark yourself as interested on the event!",
 		EventColor:             0xFFFFFF,
 	}
 
@@ -568,7 +601,7 @@ func (em *EventManager) possiblyCreateGuild(ctx context.Context, guildId string)
 		return nil, false, err
 	}
 
-	return nil, true, nil
+	return guild, true, nil
 }
 
 func (em *EventManager) deleteEvent(ctx context.Context, log *logrus.Entry, s *discordgo.Session, guild *Guild, event *Event, m *discordgo.GuildScheduledEvent) (err error) {

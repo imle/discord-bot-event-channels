@@ -12,10 +12,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+import (
+	_ "github.com/lib/pq"
+)
+
 // Injectors from wire.go:
 
 func InitializeEventManager(logger *logrus.Logger, engineConfig EngineConfig) (*bot.EventManager, error) {
-	engineInterface, err := NewEngine(engineConfig)
+	engineInterface, err := NewEngine(engineConfig, logger)
 	if err != nil {
 		return nil, err
 	}
