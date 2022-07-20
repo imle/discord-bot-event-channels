@@ -39,10 +39,10 @@ func (l *xormLogrus) AfterSQL(ctx log.LogContext) {
 	}
 
 	fields := logrus.Fields{
-		"xorm.session":  sessionPart,
-		"xorm.sql":      ctx.SQL,
-		"xorm.args":     ctx.Args,
-		"xorm.duration": ctx.ExecuteTime,
+		"xorm.session": sessionPart,
+		"sql":          ctx.SQL,
+		"args":         ctx.Args,
+		"duration":     ctx.ExecuteTime,
 	}
 
 	l.logger.WithFields(fields).Debugf("sql statement")
