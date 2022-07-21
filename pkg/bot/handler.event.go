@@ -608,7 +608,7 @@ func getOptionsMap(
 	}
 
 	if category != nil {
-		channelValue := channel.ChannelValue(s)
+		channelValue := category.ChannelValue(s)
 		if channelValue == nil {
 			return nil, "not a valid category channel"
 		}
@@ -624,7 +624,6 @@ func (em *EventManager) possiblyCreateGuild(ctx context.Context, m *discordgo.Gu
 	guild = &Guild{
 		ID:                         m.ID,
 		NewEventChannelMessage:     "`%EVENT%` was just created, if you want to join the channel, mark yourself as interested on the event!",
-		EventColor:                 0xFFFFFF,
 		EventAnnouncementChannelID: m.PublicUpdatesChannelID,
 	}
 

@@ -13,7 +13,7 @@ const (
 	ConfigOptionAnnounceMessage            ConfigOption = "announce-message"
 	ConfigOptionAnnounceChannel            ConfigOption = "announce-channel"
 	ConfigOptionDeleteChannelWhenEventDone ConfigOption = "delete-channel-when-event-done"
-	ConfigOptionCategoryID                 ConfigOption = "category-id"
+	ConfigOptionCategoryID                 ConfigOption = "category-channel"
 )
 
 var cmdOptions = discordgo.ApplicationCommand{

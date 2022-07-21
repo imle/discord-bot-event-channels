@@ -10,7 +10,6 @@ type Guild struct {
 	NewEventChannelMessage     string
 	DeleteWhenDone             bool
 	EventAnnouncementChannelID string
-	EventColor                 int
 	EventChannelParentID       string
 }
 
