@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -13,6 +14,9 @@ type Guild struct {
 	EventChannelParentID       string
 }
 
-func (g *Guild) GetNewEventChannelMessage(eventName string) string {
-	return strings.Replace(g.NewEventChannelMessage, "%EVENT%", eventName, -1)
+func (g *Guild) GetNewEventChannelMessage(eventName string, inviteCode string, eventID string) string {
+	return fmt.Sprintf("%s\n%s",
+		strings.Replace(g.NewEventChannelMessage, "%EVENT%", eventName, -1),
+		getEventInviteURL(inviteCode, eventID),
+	)
 }

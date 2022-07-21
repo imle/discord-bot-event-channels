@@ -7,33 +7,45 @@ import (
 var dmPermission = false
 var defaultMemberPermissions int64 = discordgo.PermissionManageServer
 
-var cmdNewEventChannelMessage = discordgo.ApplicationCommand{
-	Name:                     "new-event-channel-message",
-	Description:              "Message to send when a new channel is created",
+type ConfigOption = string
+
+const (
+	ConfigOptionAnnounceMessage            ConfigOption = "announce-message"
+	ConfigOptionAnnounceChannel            ConfigOption = "announce-channel"
+	ConfigOptionDeleteChannelWhenEventDone ConfigOption = "delete-channel-when-event-done"
+	ConfigOptionCategoryID                 ConfigOption = "category-id"
+)
+
+var cmdOptions = discordgo.ApplicationCommand{
+	Name:                     "event-channels-bot-options",
+	Description:              "Set bot options",
 	DMPermission:             &dmPermission,
 	DefaultMemberPermissions: &defaultMemberPermissions,
 	Options: []*discordgo.ApplicationCommandOption{
 		{
-			Name:        "message",
+			Name:        ConfigOptionAnnounceMessage,
 			Description: "The message",
 			Type:        discordgo.ApplicationCommandOptionString,
-			Required:    false,
 			MaxLength:   255,
+		},
+		{
+			Name:         ConfigOptionAnnounceChannel,
+			Description:  "The channel",
+			Type:         discordgo.ApplicationCommandOptionChannel,
+			ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildText},
+		},
+		{
+			Name:        ConfigOptionDeleteChannelWhenEventDone,
+			Description: "Whether or not to delete",
+			Type:        discordgo.ApplicationCommandOptionBoolean,
+		},
+		{
+			Name:         ConfigOptionCategoryID,
+			Description:  "The category channel to add the event channel to",
+			Type:         discordgo.ApplicationCommandOptionChannel,
+			ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildCategory},
 		},
 	},
 }
 
-var cmdDeleteWhenDone = discordgo.ApplicationCommand{
-	Name:                     "event-delete-when-done",
-	Description:              "Delete the event channel when the event is finished or canceled",
-	DMPermission:             &dmPermission,
-	DefaultMemberPermissions: &defaultMemberPermissions,
-	Options: []*discordgo.ApplicationCommandOption{
-		{
-			Name:        "value",
-			Description: "Whether or not to delete",
-			Type:        discordgo.ApplicationCommandOptionBoolean,
-			Required:    true,
-		},
-	},
-}
+// TODO: Build reconcile command (don't do it on add).
