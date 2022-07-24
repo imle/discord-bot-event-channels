@@ -11,6 +11,10 @@ type Guild struct {
 	DeleteWhenDone             bool
 	EventAnnouncementChannelID string
 	EventChannelParentID       string
+	ConfigurationWasRun        bool
+	FirstReconcileRun          bool
+
+	// TODO: DM Server Owner on add to explain how to get started.
 }
 
 func (g *Guild) GetNewEventChannelMessage(eventName string, inviteCode string, eventID string) string {

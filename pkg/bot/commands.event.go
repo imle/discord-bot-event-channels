@@ -4,6 +4,11 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+var globalCommands = []*discordgo.ApplicationCommand{
+	&cmdOptions,
+	&cmdSync,
+}
+
 var dmPermission = false
 var defaultMemberPermissions int64 = discordgo.PermissionManageServer
 
@@ -48,4 +53,43 @@ var cmdOptions = discordgo.ApplicationCommand{
 	},
 }
 
-// TODO: Build reconcile command (don't do it on add).
+func getConfigOptionsMap(s *discordgo.Session, options map[string]*discordgo.ApplicationCommandInteractionDataOption, g *Guild) (errMessage string) {
+	message := options[ConfigOptionAnnounceMessage]
+	channel := options[ConfigOptionAnnounceChannel]
+	shouldDelete := options[ConfigOptionDeleteChannelWhenEventDone]
+	category := options[ConfigOptionCategoryID]
+
+	if message != nil {
+		g.NewEventChannelMessage = message.StringValue()
+	}
+
+	if channel != nil {
+		channelValue := channel.ChannelValue(s)
+		if channelValue == nil {
+			return "not a valid announce channel"
+		}
+		g.EventAnnouncementChannelID = channelValue.ID
+	}
+
+	if shouldDelete != nil {
+		g.DeleteWhenDone = shouldDelete.BoolValue()
+	}
+
+	if category != nil {
+		channelValue := category.ChannelValue(s)
+		if channelValue == nil {
+			return "not a valid category channel"
+		}
+		g.EventChannelParentID = channelValue.ID
+	}
+
+	return ""
+}
+
+var cmdSync = discordgo.ApplicationCommand{
+	Name:                     "event-channels-sync",
+	Description:              "Run the initial sync",
+	DMPermission:             &dmPermission,
+	DefaultMemberPermissions: &defaultMemberPermissions,
+	Options:                  []*discordgo.ApplicationCommandOption{},
+}

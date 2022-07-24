@@ -2,15 +2,11 @@ package bot
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 	"xorm.io/xorm"
 	"xorm.io/xorm/names"
@@ -73,6 +69,21 @@ func (em *EventManager) ConsumeSession(s *discordgo.Session) {
 		err := em.onGuildCreate(context.TODO(), s, m)
 		if err != nil {
 			log.WithError(err).Error("failed guild create")
+			return
+		}
+	})
+
+	s.AddHandler(func(s *discordgo.Session, m *discordgo.GuildDelete) {
+		log := em.logger.WithFields(logrus.Fields{
+			"method":   "GuildCreate",
+			"guild_id": m.ID,
+		})
+
+		log.Debug("received")
+
+		err := em.onGuildDelete(context.TODO(), log, s, m)
+		if err != nil {
+			log.WithError(err).Error("failed guild remove")
 			return
 		}
 	})
@@ -177,7 +188,7 @@ func (em *EventManager) ConsumeSession(s *discordgo.Session) {
 
 		log.Debug("received")
 
-		err := em.handleInteraction(s, i)
+		err := em.handleInteraction(context.TODO(), log, s, i)
 		if err != nil {
 			log.WithError(err).Error("failed")
 			return
@@ -186,9 +197,7 @@ func (em *EventManager) ConsumeSession(s *discordgo.Session) {
 }
 
 func (em *EventManager) RegisterGlobalCommands(session *discordgo.Session) error {
-	_, err := session.ApplicationCommandBulkOverwrite(session.State.User.ID, "", []*discordgo.ApplicationCommand{
-		&cmdOptions,
-	})
+	_, err := session.ApplicationCommandBulkOverwrite(session.State.User.ID, "", globalCommands)
 	if err != nil {
 		return err
 	}
@@ -197,8 +206,22 @@ func (em *EventManager) RegisterGlobalCommands(session *discordgo.Session) error
 }
 
 func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Session, guild *discordgo.Guild) error {
+	var internalGuild Guild
+	found, err := em.engine.Context(ctx).Table(&Guild{}).Where("id = ?", guild.ID).Get(&internalGuild)
+	if err != nil {
+		return err
+	}
+
+	if !found {
+		return fmt.Errorf("no guild with that id")
+	}
+
+	if !internalGuild.ConfigurationWasRun || !internalGuild.FirstReconcileRun {
+		return nil
+	}
+
 	var internalEvents []*Event
-	err := em.engine.Context(ctx).Table(&Event{}).Where("guild_id = ?", guild.ID).Find(&internalEvents)
+	err = em.engine.Context(ctx).Table(&Event{}).Where("guild_id = ?", guild.ID).Find(&internalEvents)
 	if err != nil {
 		return err
 	}
@@ -310,7 +333,7 @@ func (em *EventManager) onReady(ctx context.Context, log *logrus.Entry, s *disco
 	return nil
 }
 
-// When a discordgo.Guild is added to the service that we reconcile it.
+// When a discordgo.Guild is added we want to alert the Owner that they need to run the config command.
 func (em *EventManager) onGuildCreate(ctx context.Context, s *discordgo.Session, m *discordgo.GuildCreate) error {
 	_, exists, err := em.possiblyCreateGuild(ctx, m.Guild)
 	if err != nil {
@@ -322,9 +345,32 @@ func (em *EventManager) onGuildCreate(ctx context.Context, s *discordgo.Session,
 		return nil
 	}
 
-	err = em.reconcile(ctx, s, m.Guild)
+	// First time we have seen the guild, we want to go ahead and create the welcome message.
+	channel, err := s.UserChannelCreate(m.OwnerID)
 	if err != nil {
-		return fmt.Errorf("failed to reconcile guild: %w", err)
+		return err
+	}
+
+	_, err = s.ChannelMessageSend(channel.ID,
+		"Thanks for adding Event Channels to your Discord server!\nDon't forget to run the setup command!",
+	)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// When a discordgo.Guild is removed, we drop its data.
+func (em *EventManager) onGuildDelete(ctx context.Context, log *logrus.Entry, s *discordgo.Session, m *discordgo.GuildDelete) error {
+	_, err := em.engine.Context(ctx).Delete(&Guild{ID: m.Guild.ID})
+	if err != nil {
+		log.WithError(err).Warn("failed to delete the guild")
+	}
+
+	_, err = em.engine.Context(ctx).Delete(&Event{GuildID: m.Guild.ID})
+	if err != nil {
+		log.WithError(err).Warn("failed to delete the guild")
 	}
 
 	return nil
@@ -432,7 +478,7 @@ func (em *EventManager) onGuildEventCreate(ctx context.Context, log *logrus.Entr
 		ChannelID: channel.ID,
 	}
 	if message != nil {
-		event.AnnounceMessageID = message.ID
+		event.AnnounceMessageID = &message.ID
 	}
 	_, err = em.engine.Insert(event)
 	if err != nil {
@@ -457,7 +503,7 @@ func (em *EventManager) onGuildEventUpdate(ctx context.Context, log *logrus.Entr
 	case discordgo.GuildScheduledEventStatusCompleted, discordgo.GuildScheduledEventStatusCanceled:
 		log.Debug("received delete via update event")
 
-		return em.deleteEvent(ctx, log, s, guild, event, m.GuildScheduledEvent)
+		return em.deleteEvent(ctx, log, s, guild, event)
 	default:
 		_, err = s.ChannelEdit(event.ChannelID, eventChannelName(m.Name))
 		if err != nil {
@@ -479,7 +525,7 @@ func (em *EventManager) onGuildEventDelete(ctx context.Context, log *logrus.Entr
 		return fmt.Errorf("was not able to find internal event")
 	}
 
-	err = em.deleteEvent(ctx, log, s, guild, event, m.GuildScheduledEvent)
+	err = em.deleteEvent(ctx, log, s, guild, event)
 	if err != nil {
 		return fmt.Errorf("failed to delete event: %w", err)
 	}
@@ -537,88 +583,301 @@ func (em *EventManager) onGuildEventUserRemove(ctx context.Context, s *discordgo
 	return nil
 }
 
-var regexColorPattern = regexp.MustCompile(`(?i)#?(?:[a-f\d]{3}){1,2}$`)
-
-func (em *EventManager) handleInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	optionsSlice := i.ApplicationCommandData().Options
-	options := make(map[string]*discordgo.ApplicationCommandInteractionDataOption, len(optionsSlice))
-	for _, opt := range optionsSlice {
-		options[opt.Name] = opt
-	}
-
-	var reply string
-	switch i.ApplicationCommandData().Name {
-	case cmdOptions.Name:
-		updateValues, errMessage := getOptionsMap(s, options)
-		if errMessage != "" {
-			reply = errMessage
-			break
-		}
-
-		_, err := em.engine.Table(&Guild{}).ID(i.GuildID).Update(updateValues)
+func (em *EventManager) handleInteraction(ctx context.Context, log *logrus.Entry, s *discordgo.Session, i *discordgo.InteractionCreate) (err error) {
+	defer func() {
 		if err != nil {
-			em.logger.WithError(err).Error("failed to update guild message")
-			reply = "Failed to update config settings."
-		} else {
-			reply = "Successfully updated config settings!"
+			_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+				Content: "Something went wrong",
+			})
+			return
 		}
-	}
+	}()
 
-	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: reply,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to reply to command: %w", err)
+	switch i.Type {
+	case discordgo.InteractionPing:
+	case discordgo.InteractionApplicationCommand:
+		switch i.ApplicationCommandData().Name {
+		case cmdOptions.Name:
+			optionsSlice := i.ApplicationCommandData().Options
+			options := make(map[string]*discordgo.ApplicationCommandInteractionDataOption, len(optionsSlice))
+			for _, opt := range optionsSlice {
+				options[opt.Name] = opt
+			}
+
+			var guild Guild
+			found, err := em.engine.Context(ctx).ID(i.GuildID).Get(&guild)
+			if err != nil {
+				return err
+			}
+
+			if !found {
+				return fmt.Errorf("could not find guild")
+			}
+
+			var reply string
+			errMessage := getConfigOptionsMap(s, options, &guild)
+			if errMessage != "" {
+				reply = errMessage
+				break
+			}
+
+			guild.ConfigurationWasRun = true
+			_, err = em.engine.ID(i.GuildID).UseBool().Update(guild)
+			if err != nil {
+				em.logger.WithError(err).Error("failed to update guild message")
+				reply = "Failed to update config settings."
+			} else {
+				reply = "Successfully updated config settings!"
+			}
+
+			err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: reply,
+				},
+			})
+			if err != nil {
+				return fmt.Errorf("failed to reply to command: %w", err)
+			}
+		case cmdSync.Name:
+			err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+				Data: &discordgo.InteractionResponseData{
+					Content: "loading your events",
+				},
+			})
+			if err != nil {
+				return err
+			}
+
+			selects, err := em.getEventSelects(s, i.GuildID, false)
+			if err != nil {
+				return err
+			}
+
+			_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+				Content: "Select the channels you want to assign to these already existing events.\n" +
+					"If no channel is selected for an event, one will be created.\n" +
+					"Channels selected here will be made private and the users marked as interested will be given access.",
+				Components: []discordgo.MessageComponent{
+					&discordgo.ActionsRow{
+						Components: selects,
+					},
+					&discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							&discordgo.Button{
+								CustomID: "finish",
+								Label:    "Done",
+								Style:    discordgo.SuccessButton,
+							},
+						},
+					},
+				},
+			})
+			if err != nil {
+				return err
+			}
+		}
+	case discordgo.InteractionMessageComponent:
+		data := i.Data.(discordgo.MessageComponentInteractionData)
+		switch data.CustomID {
+		case "finish":
+			err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseDeferredMessageUpdate,
+			})
+			if err != nil {
+				return err
+			}
+
+			message := "finishing up..."
+			components := make([]discordgo.MessageComponent, 0)
+			_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content:    &message,
+				Components: &components,
+			})
+			if err != nil {
+				return err
+			}
+
+			events, err := s.GuildScheduledEvents(i.GuildID, false)
+			if err != nil {
+				return err
+			}
+
+			var guild Guild
+			found, err := em.engine.Context(ctx).ID(i.GuildID).Get(&guild)
+			if err != nil {
+				return err
+			}
+
+			if !found {
+				return fmt.Errorf("could not find guild")
+			}
+
+			var internalEvents = map[string]*Event{}
+			err = em.engine.Context(ctx).Where("guild_id = ?", i.GuildID).Find(&internalEvents)
+			if err != nil {
+				return err
+			}
+
+			var roles []*discordgo.Role
+			roles, err = s.GuildRoles(i.GuildID)
+			if err != nil {
+				return fmt.Errorf("failed to create role: %w", err)
+			}
+			var atEveryoneRole *discordgo.Role
+			for _, role := range roles {
+				if role.Name == "@everyone" {
+					atEveryoneRole = role
+					break
+				}
+			}
+			if atEveryoneRole == nil {
+				return fmt.Errorf("failed to find @everyone role")
+			}
+
+			for _, event := range events {
+				internalEvent, found := internalEvents[event.ID]
+				if !found {
+					err := em.onGuildEventCreate(ctx, log, s, &discordgo.GuildScheduledEventCreate{
+						GuildScheduledEvent: event,
+					})
+					if err != nil {
+						return err
+					}
+				} else {
+					permissionOverwrites := []*discordgo.PermissionOverwrite{
+						{
+							ID:    s.State.User.ID,
+							Type:  discordgo.PermissionOverwriteTypeMember,
+							Allow: discordgo.PermissionViewChannel,
+						},
+						{
+							ID:   atEveryoneRole.ID,
+							Type: discordgo.PermissionOverwriteTypeRole,
+							Deny: discordgo.PermissionViewChannel,
+						},
+					}
+
+					var lastID string
+					for {
+						eventUsers, err := s.GuildScheduledEventUsers(i.GuildID, event.ID, 100, false, "", lastID)
+						if err != nil {
+							return err
+						}
+						if len(eventUsers) == 0 {
+							break
+						}
+						lastID = eventUsers[len(eventUsers)-1].User.ID
+						for _, eventUser := range eventUsers {
+							permissionOverwrites = append(permissionOverwrites, &discordgo.PermissionOverwrite{
+								ID:    eventUser.User.ID,
+								Type:  discordgo.PermissionOverwriteTypeMember,
+								Allow: discordgo.PermissionViewChannel,
+							})
+						}
+					}
+
+					_, err = s.ChannelEditComplex(internalEvent.ChannelID, &discordgo.ChannelEdit{
+						ParentID:             guild.EventChannelParentID,
+						PermissionOverwrites: permissionOverwrites,
+					})
+					if err != nil {
+						return err
+					}
+
+				}
+			}
+
+			guild.FirstReconcileRun = true
+			_, err = em.engine.Context(ctx).ID(guild.ID).UseBool().Update(&guild)
+			if err != nil {
+				return err
+			}
+
+			content := "Channels linked!"
+			_, err = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+				Content: &content,
+			})
+			if err != nil {
+				return err
+			}
+		default:
+			if len(data.Values) != 1 {
+				_, _ = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
+					Content: "No value selected",
+				})
+				return nil
+			}
+			channelID := data.Values[0]
+
+			err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+				Type: discordgo.InteractionResponseDeferredMessageUpdate,
+			})
+			if err != nil {
+				return err
+			}
+
+			_, err = em.engine.Context(ctx).Insert(&Event{
+				ID:                data.CustomID,
+				GuildID:           i.GuildID,
+				ChannelID:         channelID,
+				AnnounceMessageID: nil,
+			})
+			if isErrDuplicatePGConstraint(err) {
+				_, err = em.engine.Context(ctx).Update(&Event{
+					ID:                data.CustomID,
+					GuildID:           i.GuildID,
+					ChannelID:         channelID,
+					AnnounceMessageID: nil,
+				})
+			}
+			if err != nil {
+				return err
+			}
+		}
+	case discordgo.InteractionApplicationCommandAutocomplete:
+	case discordgo.InteractionModalSubmit:
 	}
 
 	return nil
 }
 
-func getOptionsMap(
-	s *discordgo.Session,
-	options map[string]*discordgo.ApplicationCommandInteractionDataOption,
-) (
-	data map[string]interface{},
-	errMessage string,
-) {
-	message := options[ConfigOptionAnnounceMessage]
-	channel := options[ConfigOptionAnnounceChannel]
-	shouldDelete := options[ConfigOptionDeleteChannelWhenEventDone]
-	category := options[ConfigOptionCategoryID]
-
-	var updateValues = map[string]interface{}{}
-
-	if message != nil {
-		updateValues["new_event_channel_message"] = message.StringValue()
+func (em *EventManager) getEventSelects(s *discordgo.Session, guildID string, disabled bool) ([]discordgo.MessageComponent, error) {
+	events, err := s.GuildScheduledEvents(guildID, false)
+	if err != nil {
+		return nil, err
 	}
 
-	if channel != nil {
-		channelValue := channel.ChannelValue(s)
-		if channelValue == nil {
-			return nil, "not a valid announce channel"
+	channels, err := s.GuildChannels(guildID)
+	if err != nil {
+		return nil, err
+	}
+
+	selectOptions := make([]discordgo.SelectMenuOption, 0, len(channels))
+	for idx := range channels {
+		if channels[idx].Type != discordgo.ChannelTypeGuildText {
+			continue
 		}
-		updateValues["event_announcement_channel_id"] = channelValue.ID
+
+		selectOptions = append(selectOptions, discordgo.SelectMenuOption{
+			Label: channels[idx].Name,
+			Value: channels[idx].ID,
+		})
 	}
 
-	if shouldDelete != nil {
-		updateValues["delete_when_done"] = shouldDelete.BoolValue()
+	selects := make([]discordgo.MessageComponent, 0, 2*len(events))
+	for idx := range events {
+		selects = append(selects, &discordgo.SelectMenu{
+			CustomID:    events[idx].ID,
+			Placeholder: events[idx].Name,
+			MaxValues:   1,
+			Options:     selectOptions,
+			Disabled:    disabled,
+		})
 	}
-
-	if category != nil {
-		channelValue := category.ChannelValue(s)
-		if channelValue == nil {
-			return nil, "not a valid category channel"
-		}
-		updateValues["event_channel_parent_id"] = channelValue.ID
-	}
-
-	return updateValues, ""
+	return selects, nil
 }
-
-const PGUniqueConstraintViolation = "23505"
 
 func (em *EventManager) possiblyCreateGuild(ctx context.Context, m *discordgo.Guild) (guild *Guild, exists bool, err error) {
 	guild = &Guild{
@@ -632,12 +891,7 @@ func (em *EventManager) possiblyCreateGuild(ctx context.Context, m *discordgo.Gu
 		return guild, false, nil
 	}
 
-	var pqErr *pq.Error
-	if !errors.As(err, &pqErr) {
-		return nil, false, err
-	}
-
-	if pqErr.Code != PGUniqueConstraintViolation {
+	if !isErrDuplicatePGConstraint(err) {
 		return nil, false, err
 	}
 
@@ -649,7 +903,7 @@ func (em *EventManager) possiblyCreateGuild(ctx context.Context, m *discordgo.Gu
 	return guild, true, nil
 }
 
-func (em *EventManager) deleteEvent(ctx context.Context, log *logrus.Entry, s *discordgo.Session, guild *Guild, event *Event, m *discordgo.GuildScheduledEvent) (err error) {
+func (em *EventManager) deleteEvent(ctx context.Context, log *logrus.Entry, s *discordgo.Session, guild *Guild, event *Event) (err error) {
 	if guild.DeleteWhenDone {
 		_, err = s.ChannelDelete(event.ChannelID)
 		if err != nil {
@@ -683,33 +937,4 @@ func (em *EventManager) getGuildAndEvent(ctx context.Context, guildID string, ev
 	}
 
 	return guild, event, nil
-}
-
-var dash = regexp.MustCompile(`\s+`)
-
-func eventChannelName(name string) string {
-	name = string(dash.ReplaceAll([]byte(name), []byte{'-'}))
-	return strings.ToLower(name)
-}
-
-func isDiscordErrRESTCode(err error, code int) bool {
-	restCode, present := getDiscordErrRESTCode(err)
-	if present {
-		return false
-	}
-
-	return restCode == code
-}
-
-func getDiscordErrRESTCode(err error) (int, bool) {
-	if err == nil {
-		return 0, false
-	}
-
-	var discordErr *discordgo.RESTError
-	if !errors.As(err, &discordErr) {
-		return 0, false
-	}
-
-	return discordErr.Response.StatusCode, true
 }
