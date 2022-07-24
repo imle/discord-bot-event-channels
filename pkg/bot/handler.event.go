@@ -146,7 +146,7 @@ func (em *EventManager) ConsumeSession(s *discordgo.Session) {
 
 		log.Debug("received")
 
-		err := em.onGuildEventUserAdd(context.TODO(), s, m)
+		err := em.onGuildEventUserAdd(context.TODO(), log, s, m)
 		if err != nil {
 			log.WithError(err).Error("failed")
 			return
@@ -163,7 +163,7 @@ func (em *EventManager) ConsumeSession(s *discordgo.Session) {
 
 		log.Debug("received")
 
-		err := em.onGuildEventUserRemove(context.TODO(), s, m)
+		err := em.onGuildEventUserRemove(context.TODO(), log, s, m)
 		if err != nil {
 			log.WithError(err).Error("failed")
 			return
@@ -534,7 +534,7 @@ func (em *EventManager) onGuildEventDelete(ctx context.Context, log *logrus.Entr
 }
 
 // Add the discordgo.User to the discordgo.Channel for the discordgo.Event.
-func (em *EventManager) onGuildEventUserAdd(ctx context.Context, s *discordgo.Session, m *discordgo.GuildScheduledEventUserAdd) error {
+func (em *EventManager) onGuildEventUserAdd(ctx context.Context, log *logrus.Entry, s *discordgo.Session, m *discordgo.GuildScheduledEventUserAdd) error {
 	if m.UserID == s.State.User.ID {
 		return nil
 	}
@@ -553,6 +553,11 @@ func (em *EventManager) onGuildEventUserAdd(ctx context.Context, s *discordgo.Se
 		time.Sleep(1 * time.Second)
 	}
 
+	if event == nil {
+		log.Warn("was not able to find internal event")
+		return nil
+	}
+
 	err = s.ChannelPermissionSet(event.ChannelID, m.UserID, discordgo.PermissionOverwriteTypeMember, discordgo.PermissionViewChannel, 0)
 	if err != nil {
 		return fmt.Errorf("failed to add permissions to channel: %w", err)
@@ -561,7 +566,7 @@ func (em *EventManager) onGuildEventUserAdd(ctx context.Context, s *discordgo.Se
 	return nil
 }
 
-func (em *EventManager) onGuildEventUserRemove(ctx context.Context, s *discordgo.Session, m *discordgo.GuildScheduledEventUserRemove) error {
+func (em *EventManager) onGuildEventUserRemove(ctx context.Context, log *logrus.Entry, s *discordgo.Session, m *discordgo.GuildScheduledEventUserRemove) error {
 	if m.UserID == s.State.User.ID {
 		return nil
 	}
@@ -572,7 +577,8 @@ func (em *EventManager) onGuildEventUserRemove(ctx context.Context, s *discordgo
 	}
 
 	if event == nil {
-		return fmt.Errorf("was not able to find internal event")
+		log.Warn("was not able to find internal event")
+		return nil
 	}
 
 	err = s.ChannelPermissionDelete(event.ChannelID, m.UserID)

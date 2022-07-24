@@ -1,1 +1,1 @@
-Add this bot to a server: [link](https://discord.com/api/oauth2/authorize?client_id=994306417630654614&permissions=11005986832&scope=bot%20applications.commands)
+Add this bot to a server: [link](https://discord.com/api/oauth2/authorize?client_id=994306417630654614&permissions=8590067728&scope=applications.commands%20bot)
