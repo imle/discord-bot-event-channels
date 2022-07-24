@@ -665,20 +665,15 @@ func (em *EventManager) handleInteraction(ctx context.Context, log *logrus.Entry
 				Content: "Select the channels you want to assign to these already existing events.\n" +
 					"If no channel is selected for an event, one will be created.\n" +
 					"Channels selected here will be made private and the users marked as interested will be given access.",
-				Components: []discordgo.MessageComponent{
-					&discordgo.ActionsRow{
-						Components: selects,
-					},
-					&discordgo.ActionsRow{
-						Components: []discordgo.MessageComponent{
-							&discordgo.Button{
-								CustomID: "finish",
-								Label:    "Done",
-								Style:    discordgo.SuccessButton,
-							},
+				Components: append(selects, &discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						&discordgo.Button{
+							CustomID: "finish",
+							Label:    "Done",
+							Style:    discordgo.SuccessButton,
 						},
 					},
-				},
+				}),
 			})
 			if err != nil {
 				return err
@@ -791,7 +786,6 @@ func (em *EventManager) handleInteraction(ctx context.Context, log *logrus.Entry
 					if err != nil {
 						return err
 					}
-
 				}
 			}
 
@@ -874,12 +868,16 @@ func (em *EventManager) getEventSelects(s *discordgo.Session, guildID string, di
 
 	selects := make([]discordgo.MessageComponent, 0, 2*len(events))
 	for idx := range events {
-		selects = append(selects, &discordgo.SelectMenu{
-			CustomID:    events[idx].ID,
-			Placeholder: events[idx].Name,
-			MaxValues:   1,
-			Options:     selectOptions,
-			Disabled:    disabled,
+		selects = append(selects, &discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				&discordgo.SelectMenu{
+					CustomID:    events[idx].ID,
+					Placeholder: events[idx].Name,
+					MaxValues:   1,
+					Options:     selectOptions,
+					Disabled:    disabled,
+				},
+			},
 		})
 	}
 	return selects, nil
