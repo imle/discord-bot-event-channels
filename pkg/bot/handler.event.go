@@ -205,7 +205,7 @@ func (em *EventManager) RegisterGlobalCommands(session *discordgo.Session) error
 	return nil
 }
 
-func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Session, guild *discordgo.Guild) error {
+func (em *EventManager) reconcile(ctx context.Context, log *logrus.Entry, session *discordgo.Session, guild *discordgo.Guild) error {
 	var internalGuild Guild
 	found, err := em.engine.Context(ctx).Table(&Guild{}).Where("id = ?", guild.ID).Get(&internalGuild)
 	if err != nil {
@@ -216,7 +216,12 @@ func (em *EventManager) reconcile(ctx context.Context, session *discordgo.Sessio
 		return fmt.Errorf("no guild with that id")
 	}
 
-	if !internalGuild.ConfigurationWasRun || !internalGuild.FirstReconcileRun {
+	if !internalGuild.ConfigurationWasRun {
+		log.Warn("!internalGuild.ConfigurationWasRun")
+		return nil
+	}
+	if !internalGuild.FirstReconcileRun {
+		log.Warn("!internalGuild.FirstReconcileRun")
 		return nil
 	}
 
@@ -324,9 +329,10 @@ func (em *EventManager) onReady(ctx context.Context, log *logrus.Entry, s *disco
 	}
 
 	for _, guild := range r.Guilds {
-		err := em.reconcile(ctx, s, guild)
+		subLog := log.WithField("guild_id", guild.ID)
+		err := em.reconcile(ctx, subLog, s, guild)
 		if err != nil {
-			log.WithField("guild_id", guild.ID).WithError(err).Errorf("failed to reconcile")
+			subLog.WithError(err).Errorf("failed to reconcile")
 		}
 	}
 
