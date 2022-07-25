@@ -690,7 +690,7 @@ func (em *EventManager) handleInteraction(ctx context.Context, log *logrus.Entry
 				webhookParams = &discordgo.WebhookParams{
 					Content: "Select the channels you want to assign to these already existing events.\n" +
 						"If no channel is selected for an event, one will be created.\n" +
-						"Channels selected here will be made private and the users marked as interested will be given access.",
+						"Channels selected here will be made private, renamed, and the users marked as interested will be given access.",
 					Components: append(selects, &discordgo.ActionsRow{
 						Components: []discordgo.MessageComponent{
 							&discordgo.Button{
@@ -808,6 +808,7 @@ func (em *EventManager) handleInteraction(ctx context.Context, log *logrus.Entry
 					}
 
 					_, err = s.ChannelEditComplex(internalEvent.ChannelID, &discordgo.ChannelEdit{
+						Name:                 eventChannelName(event.Name),
 						ParentID:             guild.EventChannelParentID,
 						PermissionOverwrites: permissionOverwrites,
 					})
