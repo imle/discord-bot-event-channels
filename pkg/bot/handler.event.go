@@ -341,7 +341,7 @@ func (em *EventManager) onReady(ctx context.Context, log *logrus.Entry, s *disco
 
 // When a discordgo.Guild is added we want to alert the Owner that they need to run the config command.
 func (em *EventManager) onGuildCreate(ctx context.Context, s *discordgo.Session, m *discordgo.GuildCreate) error {
-	_, exists, err := em.possiblyCreateGuild(ctx, m.Guild)
+	guild, exists, err := em.possiblyCreateGuild(ctx, m.Guild)
 	if err != nil {
 		return fmt.Errorf("failed to create guild: %w", err)
 	}
@@ -362,6 +362,20 @@ func (em *EventManager) onGuildCreate(ctx context.Context, s *discordgo.Session,
 	)
 	if err != nil {
 		return err
+	}
+
+	events, err := s.GuildScheduledEvents(m.Guild.ID, false)
+	if err != nil {
+		return err
+	}
+
+	// If no events, then we consider them synced.
+	if len(events) == 0 {
+		guild.FirstReconcileRun = true
+		_, err = em.engine.ID(m.Guild.ID).UseBool().Update(guild)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -667,20 +681,28 @@ func (em *EventManager) handleInteraction(ctx context.Context, log *logrus.Entry
 				return err
 			}
 
-			_, err = s.FollowupMessageCreate(i.Interaction, true, &discordgo.WebhookParams{
-				Content: "Select the channels you want to assign to these already existing events.\n" +
-					"If no channel is selected for an event, one will be created.\n" +
-					"Channels selected here will be made private and the users marked as interested will be given access.",
-				Components: append(selects, &discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						&discordgo.Button{
-							CustomID: "finish",
-							Label:    "Done",
-							Style:    discordgo.SuccessButton,
+			var webhookParams *discordgo.WebhookParams
+			if len(selects) == 0 {
+				webhookParams = &discordgo.WebhookParams{
+					Content: "You don't have any events to sync! You're ready to start creating events!",
+				}
+			} else {
+				webhookParams = &discordgo.WebhookParams{
+					Content: "Select the channels you want to assign to these already existing events.\n" +
+						"If no channel is selected for an event, one will be created.\n" +
+						"Channels selected here will be made private and the users marked as interested will be given access.",
+					Components: append(selects, &discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							&discordgo.Button{
+								CustomID: "finish",
+								Label:    "Done",
+								Style:    discordgo.SuccessButton,
+							},
 						},
-					},
-				}),
-			})
+					}),
+				}
+			}
+			_, err = s.FollowupMessageCreate(i.Interaction, true, webhookParams)
 			if err != nil {
 				return err
 			}
