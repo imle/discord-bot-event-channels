@@ -28,11 +28,14 @@ var startCmd = &cobra.Command{
 		}
 
 		logger := logrus.New()
+		if _, ok := os.LookupEnv("KUBERNETES_SERVICE_HOST"); ok {
+			logger.SetFormatter(&logrus.JSONFormatter{})
+		}
 		logger.SetLevel(logrus.DebugLevel)
 
 		manager, err := start.InitializeEventManager(logger, start.EngineConfig{
 			URI:        u,
-			LogQueries: true, // TODO:
+			LogQueries: true,
 		})
 		if err != nil {
 			return err
